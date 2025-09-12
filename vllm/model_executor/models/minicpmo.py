@@ -537,22 +537,19 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
 
         if isinstance(attn_outputs, tuple):
             if len(attn_outputs) == 3:
-                hidden_states, attn_weights, past_key_values = attn_outputs
+                hidden_states, _, past_key_values = attn_outputs
             elif len(attn_outputs) == 2:
-                hidden_states, attn_weights = attn_outputs
+                hidden_states, _ = attn_outputs
                 past_key_values = None
             elif len(attn_outputs) == 1:
                 hidden_states = attn_outputs[0]
-                attn_weights = None
                 past_key_values = None
             else:
                 # Unexpected length; fall back to first element
                 hidden_states = attn_outputs[0]
-                attn_weights = None
                 past_key_values = None
         else:
             hidden_states = attn_outputs
-            attn_weights = None
             past_key_values = None
         hidden_states = nn.functional.dropout(hidden_states,
                                               p=self.dropout,

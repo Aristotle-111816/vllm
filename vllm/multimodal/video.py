@@ -7,6 +7,10 @@ from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+import threading
+import queue
+import time
+import contextlib
 
 import numpy as np
 import numpy.typing as npt
@@ -227,14 +231,6 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         raise NotImplementedError(msg)
 
 
-# ==========================
-# URL streaming helpers
-# ==========================
-import threading
-import queue
-import time
-
-
 class URLFrameStream(threading.Thread):
 
     def __init__(self,
@@ -260,10 +256,8 @@ class URLFrameStream(threading.Thread):
             print("[ERROR] Cannot open video stream:", self.video_url)
             return
 
-        try:
+        with contextlib.suppress(Exception):
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
 
         interval = 1.0 / float(self.fps)
         next_t = time.perf_counter()
@@ -282,10 +276,8 @@ class URLFrameStream(threading.Thread):
                 frame = cv2.resize(frame, (w, h))
 
             if self.q.full():
-                try:
+                with contextlib.suppress(queue.Empty):
                     self.q.get_nowait()
-                except queue.Empty:
-                    pass
             self.q.put((self._idx, frame))
             self._idx += 1
 

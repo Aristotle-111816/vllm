@@ -1,7 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import os
 import time
 import threading
 import queue
+import contextlib
+import numpy as np
 import cv2
 import base64
 from openai import OpenAI
@@ -9,7 +14,7 @@ from openai import OpenAI
 # ===== Config =====
 FPS = 1  # Target FPS
 FRAME_W, FRAME_H = 320, 320
-VIDEO_URL = "https://814f2cb40416.ngrok-free.app/video_feed"  # Refresh every time
+VIDEO_URL = "https://814f2cb40416.ngrok-free.app/video_feed"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "token-abc123")
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "http://localhost:8000/v1")
 MODEL = os.getenv("VLLM_MODEL", "/root/autodl-tmp/MiniCPM-o-2_6")
@@ -36,10 +41,8 @@ class FrameProducer(threading.Thread):
             return
 
         # Try to reduce buffer size to avoid frame lag
-        try:
+        with contextlib.suppress(Exception):
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
 
         interval = 1.0 / self.fps
         next_t = time.perf_counter()
@@ -57,10 +60,8 @@ class FrameProducer(threading.Thread):
 
             # If queue is full, discard the old frame
             if self.q.full():
-                try:
+                with contextlib.suppress(queue.Empty):
                     self.q.get_nowait()
-                except queue.Empty:
-                    pass
             self.q.put((self._idx, frame_resized))
             self._idx += 1
 
@@ -105,7 +106,7 @@ def save_debug_frame(frame, idx: int):
 
 
 def main():
-    q = queue.Queue(maxsize=1)
+    q: "queue.Queue[tuple[int, np.ndarray]]" = queue.Queue(maxsize=1)
     producer = FrameProducer(q, FPS, VIDEO_URL)
     producer.start()
 

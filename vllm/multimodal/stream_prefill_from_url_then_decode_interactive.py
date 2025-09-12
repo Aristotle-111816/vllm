@@ -1,9 +1,14 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import os
 import sys
 import time
 import threading
 import queue
-from typing import List, Optional
+from typing import Optional
+import contextlib
 
 import cv2
 import numpy as np
@@ -42,10 +47,8 @@ class FrameProducer(threading.Thread):
                 try:
                     idx, frame = q.get(timeout=0.1)
                     if self.q.full():
-                        try:
+                        with contextlib.suppress(queue.Empty):
                             self.q.get_nowait()
-                        except queue.Empty:
-                            pass
                     self.q.put((idx, frame))
                 except queue.Empty:
                     pass
@@ -113,7 +116,7 @@ def main():
     print(f"Streaming from {args.video_url} at {args.fps} fps.")
     print("Type a question to trigger decode; 'q' to quit. Prefill runs continuously.")
 
-    frames: List[Image.Image] = []
+    frames: list[Image.Image] = []
     window_size: Optional[int] = args.window_size if args.window_size > 0 else None
 
     try:
@@ -135,12 +138,10 @@ def main():
                 payload["prompt"] = tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True)
 
-                prefill_params = SamplingParams(
-                    max_tokens=max(1, args.prefill_max_tokens),
-                    temperature=0.0,
-                    top_p=1.0,
-                    stop_token_ids=stop_token_ids,
-                )
+                prefill_params = SamplingParams(max_tokens=max(1, args.prefill_max_tokens),
+                                                temperature=0.0,
+                                                top_p=1.0,
+                                                stop_token_ids=stop_token_ids)
                 _ = llm.generate([payload], sampling_params=prefill_params)
                 print(f"[prefill] frames={len(frames)} last_idx={idx}")
             except queue.Empty:
@@ -170,12 +171,10 @@ def main():
                 decode_payload["prompt"] = tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True)
 
-                decode_params = SamplingParams(
-                    stop_token_ids=stop_token_ids,
-                    temperature=0.2,
-                    top_p=0.95,
-                    max_tokens=512,
-                )
+                decode_params = SamplingParams(stop_token_ids=stop_token_ids,
+                                               temperature=0.2,
+                                               top_p=0.95,
+                                               max_tokens=512)
                 outputs = llm.generate([decode_payload], sampling_params=decode_params)
                 print("==== Generated ====")
                 print(outputs[0].outputs[0].text)
