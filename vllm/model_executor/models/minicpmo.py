@@ -374,6 +374,104 @@ class MiniCPMOMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return _minicpmo_field_config(hf_inputs)
 
+    # --------------------
+    # Streaming helpers
+    # --------------------
+    def build_streaming_images_prefix(self, num_images: int) -> str:
+        """
+        Build the prompt prefix for N images where each image corresponds to
+        one placeholder. This follows the same placeholder style as the
+        underlying MiniCPM-V path.
+
+        Example:
+            N=3 -> "(<image>./</image>)(<image>./</image>)(<image>./</image>)"
+        """
+        if num_images <= 0:
+            return ""
+        return "(" + "<image>./</image>)" * num_images
+
+    def _slice_window(self, items: Sequence[object], window_size: Optional[int]
+                      ) -> Sequence[object]:
+        if window_size is None or window_size <= 0:
+            return items
+        return items[-window_size:]
+
+    def _build_image_uuids(self, session_id: str, count: int) -> list[str]:
+        """
+        Build stable per-image UUIDs for caching across requests.
+        The index is the global frame index in the sequence.
+        """
+        return [f"{session_id}-img-{i:06d}" for i in range(count)]
+
+    def build_streaming_images_prefill_payload(
+        self,
+        images: Sequence[object],
+        *,
+        session_id: str,
+        window_size: Optional[int] = None,
+    ) -> dict[str, object]:
+        """
+        Build a prefill-only request payload that treats each incoming video
+        frame as an image. This payload is intended to be sent with
+        SamplingParams(max_tokens=0) so that only prefill occurs.
+
+        - images: all frames seen so far as image objects (e.g., PIL.Image or
+          raw tensors). To maximize prefix-caching, pass the cumulative list on
+          every call.
+        - session_id: stable identifier to construct per-frame UUIDs.
+        - window_size: optional sliding window over the tail of `images` if you
+          want to limit context length.
+        Returns a dict with keys: "prompt", "multi_modal_data",
+        "multi_modal_uuids".
+        """
+        # Select window if requested
+        images_eff = list(self._slice_window(images, window_size))
+        # NOTE: UUIDs are built on the full sequence length to remain stable
+        # across calls; downstream caches will only use the visible subset.
+        uuids_full = self._build_image_uuids(session_id, len(images))
+        if window_size is not None and window_size > 0:
+            uuids_eff = uuids_full[-len(images_eff):]
+        else:
+            uuids_eff = uuids_full
+
+        prefix = self.build_streaming_images_prefix(len(images_eff))
+        return {
+            "prompt": prefix,
+            "multi_modal_data": {"image": images_eff},
+            "multi_modal_uuids": {"image": uuids_eff},
+        }
+
+    def build_streaming_images_decode_payload(
+        self,
+        images: Sequence[object],
+        user_text: str,
+        *,
+        session_id: str,
+        window_size: Optional[int] = None,
+        separator: str = "\n",
+    ) -> dict[str, object]:
+        """
+        Build a decode request payload by appending `user_text` after the image
+        prefix. Use this when you are ready to generate output.
+
+        Returns a dict with keys: "prompt", "multi_modal_data",
+        "multi_modal_uuids".
+        """
+        images_eff = list(self._slice_window(images, window_size))
+        uuids_full = self._build_image_uuids(session_id, len(images))
+        if window_size is not None and window_size > 0:
+            uuids_eff = uuids_full[-len(images_eff):]
+        else:
+            uuids_eff = uuids_full
+
+        prefix = self.build_streaming_images_prefix(len(images_eff))
+        prompt = prefix + (separator + user_text if user_text else "")
+        return {
+            "prompt": prompt,
+            "multi_modal_data": {"image": images_eff},
+            "multi_modal_uuids": {"image": uuids_eff},
+        }
+
 
 class MultiModalProjector(nn.Module):
 
@@ -421,11 +519,38 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
         residual = hidden_states
         past_key_values = None
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states, attn_weights, past_key_values = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            past_key_value=past_key_values,
-        )
+        # Call WhisperAttention with backward/forward-compatible arg names,
+        # and accept either 2- or 3-item tuples in return.
+        try:
+            attn_outputs = self.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                past_key_value=past_key_values,
+            )
+        except TypeError:
+            # Future versions may require `past_key_values` instead
+            attn_outputs = self.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+            )
+
+        if isinstance(attn_outputs, tuple):
+            if len(attn_outputs) == 3:
+                hidden_states, _, past_key_values = attn_outputs
+            elif len(attn_outputs) == 2:
+                hidden_states, _ = attn_outputs
+                past_key_values = None
+            elif len(attn_outputs) == 1:
+                hidden_states = attn_outputs[0]
+                past_key_values = None
+            else:
+                # Unexpected length; fall back to first element
+                hidden_states = attn_outputs[0]
+                past_key_values = None
+        else:
+            hidden_states = attn_outputs
+            past_key_values = None
         hidden_states = nn.functional.dropout(hidden_states,
                                               p=self.dropout,
                                               training=self.training)

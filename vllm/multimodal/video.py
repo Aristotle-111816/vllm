@@ -7,6 +7,10 @@ from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+import threading
+import queue
+import time
+import contextlib
 
 import numpy as np
 import numpy.typing as npt
@@ -225,3 +229,80 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
 
         msg = "Only JPEG format is supported for now."
         raise NotImplementedError(msg)
+
+
+class URLFrameStream(threading.Thread):
+
+    def __init__(self,
+                 out_q: "queue.Queue[tuple[int, npt.NDArray]]",
+                 fps: int,
+                 video_url: str,
+                 frame_size: tuple[int, int] = (320, 320)) -> None:
+        super().__init__(daemon=True)
+        self.q = out_q
+        self.fps = max(1, int(fps))
+        self.video_url = video_url
+        self.frame_size = frame_size
+        self._stop = threading.Event()
+        self._idx = 0
+
+    def run(self) -> None:
+        # Lazy import cv2 for users who don't need video
+        import cv2
+
+        cap = cv2.VideoCapture(self.video_url)
+        if not cap.isOpened():
+            # Best effort: print error and exit thread
+            print("[ERROR] Cannot open video stream:", self.video_url)
+            return
+
+        with contextlib.suppress(Exception):
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        interval = 1.0 / float(self.fps)
+        next_t = time.perf_counter()
+
+        while not self._stop.is_set():
+            # try to keep freshest frame
+            for _ in range(5):
+                cap.grab()
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.05)
+                continue
+
+            w, h = self.frame_size
+            if w > 0 and h > 0:
+                frame = cv2.resize(frame, (w, h))
+
+            if self.q.full():
+                with contextlib.suppress(queue.Empty):
+                    self.q.get_nowait()
+            self.q.put((self._idx, frame))
+            self._idx += 1
+
+            next_t += interval
+            sleep_t = next_t - time.perf_counter()
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+        cap.release()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+def start_url_stream(video_url: str,
+                     fps: int = 1,
+                     width: int = 320,
+                     height: int = 320,
+                     queue_size: int = 1) -> tuple[URLFrameStream, "queue.Queue[tuple[int, npt.NDArray]]"]:
+    """
+    Create and start a URL frame streaming thread.
+
+    Returns (thread, queue). Queue items are (frame_index, BGR ndarray).
+    """
+    q: "queue.Queue[tuple[int, npt.NDArray]]" = queue.Queue(maxsize=queue_size)
+    t = URLFrameStream(q, fps, video_url, (width, height))
+    t.start()
+    return t, q

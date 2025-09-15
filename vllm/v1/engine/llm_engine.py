@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+import time
 from copy import copy
 from typing import Any, Callable, Optional, Union
 
@@ -115,6 +116,12 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+        # KV stream sessions (Stage 1): allow multiple prefill-only requests
+        # to contribute to a shared session context, then decode once.
+        # NOTE: This is a front-end helper that builds requests with stable
+        # UUIDs and consistent prompts so that prefix/MM caches are reused.
+        self._kv_stream_sessions: dict[str, dict[str, object]] = {}
 
     @classmethod
     def from_vllm_config(
@@ -296,6 +303,141 @@ class LLMEngine:
                              "skip_tokenizer_init is True")
 
         return self.tokenizer
+
+    # ---------------- KV Stream Session (Stage 1) ----------------
+    def kv_session_begin(self, session_id: str, *, window_size: int | None = None) -> None:
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer is required for KV sessions.")
+        self._kv_stream_sessions[session_id] = {
+            "frames": [],  # list[object]
+            "total_images": 0,
+            "window_size": window_size,
+        }
+
+    def _kv__build_chat_prompt(self, num_images: int, user_text: str | None = None) -> str:
+        assert self.tokenizer is not None
+        content = "(<image>./</image>)" * max(num_images, 0)
+        if user_text:
+            content = content + "\n" + user_text
+        messages = [{"role": "user", "content": content}]
+        # Use default tokenizer for chat templating
+        tk = self.tokenizer.get_lora_tokenizer(None)
+        # Some tokenizers might not implement chat template; fallback to raw
+        apply = getattr(tk, "apply_chat_template", None)
+        if callable(apply):
+            return apply(messages, tokenize=False, add_generation_prompt=True)
+        return content
+
+    def _kv__build_image_uuids(self, session_id: str, start: int, count: int) -> list[str]:
+        return [f"{session_id}-img-{i:06d}" for i in range(start, start + count)]
+
+    def kv_session_append_images(self,
+                                 session_id: str,
+                                 new_images: list[object],
+                                 *,
+                                 prefill_max_tokens: int = 1) -> None:
+        sess = self._kv_stream_sessions.get(session_id)
+        if sess is None:
+            raise ValueError(f"KV session '{session_id}' not found. Call kv_session_begin first.")
+
+        frames: list[object] = sess["frames"]  # type: ignore[assignment]
+        total_images: int = sess["total_images"]  # type: ignore[assignment]
+        window_size: int | None = sess["window_size"]  # type: ignore[assignment]
+
+        # Update session frames
+        frames.extend(new_images)
+        total_images += len(new_images)
+        if window_size is not None and window_size > 0:
+            if len(frames) > window_size:
+                del frames[:-window_size]
+
+        # Build request payload
+        prompt_str = self._kv__build_chat_prompt(len(frames))
+        if window_size is None or window_size <= 0:
+            uuids = self._kv__build_image_uuids(session_id, 0, len(frames))
+        else:
+            start_idx = max(0, total_images - len(frames))
+            uuids = self._kv__build_image_uuids(session_id, start_idx, len(frames))
+
+        inputs = {
+            "prompt": prompt_str,
+            "multi_modal_data": {"image": frames},
+            "multi_modal_uuids": {"image": uuids},
+        }
+
+        # Minimal prefill; some versions require at least 1 token
+        prefill_params = SamplingParams(
+            max_tokens=max(1, prefill_max_tokens),
+            temperature=0.0,
+            top_p=1.0,
+        )
+        # Submit request and synchronously drive engine until this append
+        # request finishes so that KV/prefix caches are actually populated.
+        req_id = f"{session_id}-append-{total_images}"
+        self.add_request(
+            request_id=req_id,
+            prompt=inputs,  # type: ignore[arg-type]
+            params=prefill_params,
+        )
+
+        # Drive the engine: loop until req_id is finished or timeout.
+        # Keep this tight to minimize latency of streaming prefill.
+        t0 = time.time()
+        timeout_s = 30.0
+        while True:
+            step_outputs = self.step()
+            # If any output corresponds to req_id, we consider this append done
+            if step_outputs:
+                for ro in step_outputs:
+                    if getattr(ro, "request_id", None) == req_id:
+                        # Found this append request result
+                        step_outputs = None  # release
+                        break
+                else:
+                    # Different request outputs; continue stepping
+                    pass
+                # If broke above, exit loop
+                if step_outputs is None:
+                    break
+            if time.time() - t0 > timeout_s:
+                break
+            # Avoid busy spin
+            time.sleep(0.01)
+
+        # Update session counters
+        sess["total_images"] = total_images
+
+    def kv_session_decode(self,
+                          session_id: str,
+                          user_text: str,
+                          *,
+                          sampling_params: SamplingParams | None = None) -> None:
+        sess = self._kv_stream_sessions.get(session_id)
+        if sess is None:
+            raise ValueError(f"KV session '{session_id}' not found.")
+        frames: list[object] = sess["frames"]  # type: ignore[assignment]
+        total_images: int = sess["total_images"]  # type: ignore[assignment]
+        window_size: int | None = sess["window_size"]  # type: ignore[assignment]
+
+        prompt_str = self._kv__build_chat_prompt(len(frames), user_text=user_text)
+        if window_size is None or window_size <= 0:
+            uuids = self._kv__build_image_uuids(session_id, 0, len(frames))
+        else:
+            start_idx = max(0, total_images - len(frames))
+            uuids = self._kv__build_image_uuids(session_id, start_idx, len(frames))
+
+        inputs = {
+            "prompt": prompt_str,
+            "multi_modal_data": {"image": frames},
+            "multi_modal_uuids": {"image": uuids},
+        }
+
+        params = sampling_params or SamplingParams(max_tokens=512, temperature=0.2, top_p=0.95)
+        self.add_request(
+            request_id=f"{session_id}-decode",
+            prompt=inputs,  # type: ignore[arg-type]
+            params=params,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
