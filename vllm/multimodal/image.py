@@ -44,6 +44,14 @@ def convert_image_mode(image: Image.Image, to_mode: str):
         return image.convert(to_mode)
 
 
+def _decode_image_b64(b64_data: str) -> Image.Image:
+    """Decode base64-encoded image (webp/jpeg) into an RGB PIL image."""
+    raw = pybase64.b64decode(b64_data, validate=True)
+    image = Image.open(BytesIO(raw))
+    image.load()
+    return image.convert("RGB")
+
+
 class ImageMediaIO(MediaIO[Image.Image]):
 
     def __init__(self, image_mode: str = "RGB", **kwargs) -> None:

@@ -421,11 +421,41 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
         residual = hidden_states
         past_key_values = None
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states, attn_weights, past_key_values = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            past_key_value=past_key_values,
-        )
+        # Call WhisperAttention with backward/forward-compatible arg names,
+        #accept either 2- or 3-item tuples in return.
+        try:
+            attn_outputs = self.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                past_key_value=past_key_values,
+            )
+        except TypeError:
+            # Future versions may require `past_key_values` instead
+            attn_outputs = self.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+            )
+
+        if isinstance(attn_outputs, tuple):
+            if len(attn_outputs) == 3:
+                hidden_states, attn_weights, past_key_values = attn_outputs
+            elif len(attn_outputs) == 2:
+                hidden_states, attn_weights = attn_outputs
+                past_key_values = None
+            elif len(attn_outputs) == 1:
+                hidden_states = attn_outputs[0]
+                attn_weights = None
+                past_key_values = None
+            else:
+                # Unexpected length; fall back to first element
+                hidden_states = attn_outputs[0]
+                attn_weights = None
+                past_key_values = None
+        else:
+            hidden_states = attn_outputs
+            attn_weights = None
+            past_key_values = None
         hidden_states = nn.functional.dropout(hidden_states,
                                               p=self.dropout,
                                               training=self.training)

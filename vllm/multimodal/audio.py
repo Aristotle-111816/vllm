@@ -47,6 +47,22 @@ def resample_audio_scipy(
         return scipy.signal.resample_poly(audio, target_sr // orig_sr, 1)
     return audio
 
+def _decode_wav_b64_to_float32(
+    b64_data: str,
+    *,
+    target_sr: int,
+) -> npt.NDArray[np.float32]:
+    """Decode base64 WAV/encoded audio bytes to mono float32 at target_sr.
+
+    Uses librosa to read from an in-memory buffer, keeps mono, and resamples
+    when necessary.
+    """
+    wav_bytes = base64.b64decode(b64_data)
+    y, sr = librosa.load(BytesIO(wav_bytes), sr=None, mono=True)
+    if sr is not None and sr > 0 and sr != target_sr:
+        y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+    return np.asarray(y, dtype=np.float32)
+
 
 class AudioResampler:
     """Resample audio data to a target sample rate."""
