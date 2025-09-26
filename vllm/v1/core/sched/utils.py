@@ -54,6 +54,15 @@ def check_stop(request: Request,
             return True
         return False
 
+    # Prefill-only: when max_tokens==0, there is no decode step.
+    # Finish as soon as prefill completes to avoid reading last_token_id.
+    sp = request.sampling_params
+    if sp is not None and sp.max_tokens == 0:
+        if request.num_computed_tokens >= request.num_tokens:
+            request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+            return True
+        return False
+
     sampling_params = request.sampling_params
     assert sampling_params is not None
     last_token_id = request.output_token_ids[-1]
