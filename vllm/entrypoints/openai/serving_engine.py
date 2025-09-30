@@ -1012,6 +1012,14 @@ class OpenAIServing:
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
+        #  If callers provided stable UUIDs for multi-modal
+        # items, propagate them to the engine prompt so that the engine can
+        # use these identifiers as cache keys rather than hashing content.
+        # This enables cache reuse across requests when inputs are logically
+        # the same but may be provided in different forms.
+        if getattr(request, "multi_modal_uuids", None):
+            engine_prompt["multi_modal_uuids"] = request.multi_modal_uuids
+
         if hasattr(request, "cache_salt") and request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
 

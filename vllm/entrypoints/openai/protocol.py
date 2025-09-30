@@ -518,6 +518,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    # Optional stable UUIDs for multi-modal cache identifiers.
+    # Server propagates these to engine for cache reuse without content hashing.
+    # UUID list length must match corresponding multi_modal_data items.
+    multi_modal_uuids: Optional[dict[str, list[str]]] = Field(
+        default=None,
+        description=(
+            "Optional stable UUIDs for multi-modal items, mapped by modality. "
+            "If provided, lengths must match the corresponding items in "
+            "multi_modal_data; a None or missing modality implies content-"
+            "based hashing."
+        ),
+    )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
         description=("If specified, the output will follow the JSON schema."),
