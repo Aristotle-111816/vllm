@@ -11,6 +11,31 @@ from PIL import Image
 
 from .base import MediaIO
 
+def pil_to_data_url_jpeg(image: Image.Image, *, quality: int = 95) -> str:
+    """Encode PIL image into a deterministic JPEG data URL.
+
+    The function converts the image to RGB and encodes it as JPEG with
+    deterministic settings to ensure cache stability across runs.
+    """
+    img = image.convert("RGB")
+    buf = BytesIO()
+    img.save(
+        buf,
+        format="JPEG",
+        quality=quality,
+        optimize=False,
+        progressive=False,
+        subsampling=0,
+    )
+    b64 = pybase64.b64encode(buf.getvalue()).decode("utf-8")
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def decode_image_b64(b64_data: str) -> Image.Image:
+    """Decode a base64-encoded image into an RGB PIL image."""
+    raw = pybase64.b64decode(b64_data, validate=True)
+    return Image.open(BytesIO(raw)).convert("RGB")
+
 
 def rescale_image_size(image: Image.Image,
                        size_factor: float,
@@ -42,14 +67,6 @@ def convert_image_mode(image: Image.Image, to_mode: str):
         return rgba_to_rgb(image)
     else:
         return image.convert(to_mode)
-
-
-def _decode_image_b64(b64_data: str) -> Image.Image:
-    """Decode base64-encoded image (webp/jpeg) into an RGB PIL image."""
-    raw = pybase64.b64decode(b64_data, validate=True)
-    image = Image.open(BytesIO(raw))
-    image.load()
-    return image.convert("RGB")
 
 
 class ImageMediaIO(MediaIO[Image.Image]):

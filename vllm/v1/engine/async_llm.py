@@ -355,6 +355,14 @@ class AsyncLLM(EngineClient):
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
 
+            # Log prefill-only intent when max_tokens==0
+            if sampling_params is not None and sampling_params.max_tokens == 0:
+                logger.info(
+                    "[prefill-only] request_id=%s, prompt_len=%s",
+                    request_id,
+                    (len(prompt["decoder_prompt"]["prompt_token_ids"]) if isinstance(prompt, dict) and "decoder_prompt" in prompt and isinstance(prompt["decoder_prompt"], dict) and "prompt_token_ids" in prompt["decoder_prompt"] else "unknown")
+                )
+
             tokenization_kwargs: dict[str, Any] = {}
             truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
 
