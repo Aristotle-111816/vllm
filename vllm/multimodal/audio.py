@@ -7,6 +7,7 @@ from typing import Literal, Optional
 
 import numpy as np
 import numpy.typing as npt
+import wave
 
 from vllm.utils import PlaceholderModule
 
@@ -21,6 +22,28 @@ try:
     import soundfile
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
+
+def audio_to_wav_base64(audio_1s: np.ndarray, sr: int = 16000) -> str:
+    """Encode a 1-second mono float32 array to base64 WAV (PCM16)."""
+    x = np.asarray(audio_1s, dtype=np.float32).reshape(-1)
+    x = np.clip(x, -1.0, 1.0)
+    pcm16 = (x * 32767.0).astype(np.int16)
+    buf = BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(int(sr))
+        wf.writeframes(pcm16.tobytes())
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def decode_wav_b64_to_float32(b64_data: str, target_sr: int) -> np.ndarray:
+    """Decode base64 WAV bytes to mono float32 waveform at target_sr."""
+    wav_bytes = base64.b64decode(b64_data)
+    y, sr = librosa.load(BytesIO(wav_bytes), sr=None, mono=True)
+    if sr != target_sr and sr is not None and sr > 0:
+        y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+    return np.asarray(y, dtype=np.float32)
 
 
 def resample_audio_librosa(

@@ -870,6 +870,40 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
 
+            # Prefill-only: when max_tokens==0, do not expect decode tokens.
+            # If prefill is completed (num_computed_tokens >= num_tokens),
+            # finish the request with empty output and log the event.
+            if (request.sampling_params is not None
+                    and request.sampling_params.max_tokens == 0
+                    and request.num_computed_tokens >= request.num_tokens
+                    and not generated_token_ids):
+                status_before_stop = request.status
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                kv_transfer_params = self._free_request(request)
+                if status_before_stop == RequestStatus.RUNNING:
+                    stopped_running_reqs.add(request)
+                else:
+                    stopped_preempted_reqs.add(request)
+                if self.log_stats:
+                    logger.info(
+                        "[prefill-only] finished request %s: total_tokens=%d, cached_tokens=%d",
+                        req_id, request.num_tokens, request.num_cached_tokens)
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                        new_logprobs=None,
+                        new_prompt_logprobs_tensors=None,
+                        pooling_output=None,
+                        stop_reason=None,
+                        events=request.take_events(),
+                        kv_transfer_params=kv_transfer_params,
+                        num_cached_tokens=request.num_cached_tokens,
+                    ))
+                # Move to next request id.
+                continue
+
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
